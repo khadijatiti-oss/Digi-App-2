@@ -1,182 +1,166 @@
-"""Interface Streamlit locale pour le prototype DigiCompta.
-
-Lancer avec : streamlit run app.py
-Démo pédagogique uniquement : ne pas charger de factures réelles ou sensibles.
-"""
-from __future__ import annotations
-
+"""Interface DigiCompta CGNC (Streamlit), avec import CSV/Excel/PDF/images."""
+from decimal import Decimal
+from pathlib import Path
 import subprocess
 import sys
-from pathlib import Path
-
 import pandas as pd
 import streamlit as st
-
-from bilan_cpc import calculer_bilan, calculer_cpc
+import bilan_cpc
+import ocr
+import parametres_atlas as P
+from export_excel import construire_classeur
 from etats_comptables import balance_generale, grand_livre, verifier_balance
-from moteur_ecritures import generer_journal
+from import_factures import charger
+from pipeline import construire
 
 ROOT = Path(__file__).resolve().parent
-SAMPLE_CSV = ROOT / "data" / "factures_atlas.csv"
-
+DEFAULT = ROOT / "data" / "factures_atlas.csv"
 st.set_page_config(page_title="DigiCompta CGNC", page_icon="📒", layout="wide")
+
+
+def mad(x):
+    return f"{x:,.2f}".replace(",", " ").replace(".", ",") + " MAD"
+
+
+def affichage(df):
+    d = df.copy()
+    for c in d.columns:
+        if len(d) and isinstance(d[c].iloc[0], Decimal):
+            d[c] = d[c].astype(float)
+    return d
+
+
+def telecharger(df, nom, cle):
+    st.download_button("⬇️ Télécharger en CSV", df.to_csv(index=False).encode("utf-8-sig"),
+                       file_name=nom, mime="text/csv", key=cle)
+
+
+def charger_demo():
+    if not DEFAULT.exists():
+        result = subprocess.run([sys.executable, str(ROOT / "generate_dataset.py")], cwd=ROOT,
+                                capture_output=True, text=True, check=False)
+        if result.returncode:
+            raise RuntimeError(result.stderr or result.stdout or "Échec de génération du jeu de démonstration")
+    return DEFAULT.read_bytes()
+
+
 st.title("📒 DigiCompta CGNC")
-st.caption("Prototype pédagogique — données fictives, états simplifiés, non certifié.")
-st.warning(
-    "N’importez pas de factures réelles ni de données personnelles dans cette démo. "
-    "Les écritures et états doivent être vérifiés par une personne qualifiée."
-)
-
-
-def make_csv_download(frame: pd.DataFrame) -> bytes:
-    return frame.to_csv(index=False).encode("utf-8-sig")
-
-
-def load_sample() -> pd.DataFrame:
-    if not SAMPLE_CSV.exists():
-        result = subprocess.run(
-            [sys.executable, str(ROOT / "generate_dataset.py")],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(result.stderr or result.stdout or "Échec de génération du jeu de démonstration.")
-    return pd.read_csv(SAMPLE_CSV, dtype=str, keep_default_na=False, encoding="utf-8-sig")
-
-
+st.caption("Prototype académique : états simplifiés, non certifiés.")
+st.warning("Utilisez uniquement des données fictives dans cette démo. Vérifiez manuellement les factures OCR.")
 with st.sidebar:
-    st.header("Données")
-    source = st.radio("Source des factures", ["Jeu fictif de démonstration", "Importer un CSV"])
-    uploaded = None
-    if source == "Importer un CSV":
-        uploaded = st.file_uploader("Choisir un fichier CSV", type=["csv"])
-        st.caption("Format attendu : les colonnes du fichier factures_atlas.csv.")
+    st.header("Import des factures")
+    fichiers = st.file_uploader("PDF, scans/photos, CSV ou Excel", type=["pdf", "png", "jpg", "jpeg", "tif", "tiff", "csv", "xlsx"], accept_multiple_files=True)
+    st.caption("Sans fichier, le jeu fictif est utilisé. Les scans nécessitent Tesseract installé sur le serveur.")
+    photo = st.camera_input("Ou prendre une photo")
+    st.caption("Tesseract : " + ("✅ disponible" if ocr.disponible() else "❌ indisponible"))
 
+entree = [(f.name, f.getvalue()) for f in (fichiers or [])]
+if photo is not None:
+    entree.append(("photo_camera.jpg", photo.getvalue()))
+a_importer = bool(entree)
+if not a_importer:
+    entree = [("factures_atlas.csv", charger_demo())]
 try:
-    if source == "Importer un CSV":
-        if uploaded is None:
-            st.info("Importez un CSV pour commencer. Vous pouvez aussi sélectionner le jeu fictif dans le menu latéral.")
-            st.stop()
-        invoices = pd.read_csv(uploaded, dtype=str, keep_default_na=False, encoding="utf-8-sig")
-    else:
-        invoices = load_sample()
+    df, rapport, nom_source = charger(entree)
 except Exception as exc:
-    st.error(f"Impossible de charger les factures : {exc}")
+    st.error(f"Import impossible : {exc}")
     st.stop()
-
-required_columns = {
-    "facture_id", "type", "date_facture", "tiers_nom", "tiers_ice", "categorie",
-    "quantite", "prix_unitaire_ht", "taux_tva", "total_ttc_facture",
-}
-missing = sorted(required_columns - set(invoices.columns))
-if missing:
-    st.error("Colonnes manquantes dans le CSV : " + ", ".join(missing))
+if df.empty:
+    st.error("Aucune facture exploitable. Consultez le rapport d'extraction.")
+    if rapport is not None:
+        st.dataframe(rapport, width="stretch", hide_index=True)
     st.stop()
+if not a_importer:
+    nom_source = "Jeu fictif Atlas Fournitures"
+signature = tuple((n, len(c)) for n, c in entree)
+if st.session_state.get("signature") != signature:
+    st.session_state.signature = signature
+    st.session_state.valides = set()
 
-try:
-    journal_propose, controles = generer_journal(invoices)
-except Exception as exc:
-    st.error(f"Le fichier n’a pas pu être traité. Vérifiez les dates et les montants. Détail : {exc}")
-    st.stop()
+hors = sorted(set(df.loc[(df.date_facture != "") & ((df.date_facture < P.DATE_OUVERTURE) | (df.date_facture > P.DATE_ARRETE)), "facture_id"]))
+if hors:
+    st.warning(f"Factures hors période ({P.DATE_OUVERTURE} au {P.DATE_ARRETE}) : {', '.join(hors[:6])}")
+base = construire(df, set())
+ids_ok = base["ids_ok"]
+t_import, t_valid, t_etats = st.tabs(["1. Import et contrôles", "2. Validation", "3. États comptables"])
+with t_import:
+    st.subheader(f"Source : {nom_source}")
+    a,b,c = st.columns(3)
+    a.metric("Lignes importées", len(df)); b.metric("Factures", df.facture_id.nunique())
+    c.metric("Factures rejetées", int((base["controles"].resultat == "REJETEE").sum()))
+    if rapport is not None:
+        st.markdown("**Rapport d'extraction**")
+        st.dataframe(rapport, width="stretch", hide_index=True)
+    st.markdown("**Contrôles comptables**")
+    st.dataframe(base["controles"], width="stretch", hide_index=True)
+    with st.expander("Détail des lignes importées"):
+        st.dataframe(df, width="stretch", hide_index=True)
 
-invoice_ids = list(invoices["facture_id"].drop_duplicates())
-if "digicompta_validated_ids" not in st.session_state:
-    st.session_state.digicompta_validated_ids = set()
-# Remove stale selections after changing the uploaded dataset.
-st.session_state.digicompta_validated_ids.intersection_update(invoice_ids)
-
-valid_ids = st.session_state.digicompta_validated_ids
-journal = journal_propose.copy()
-if not journal.empty:
-    journal["statut"] = journal["facture_id"].map(lambda fid: "VALIDEE" if fid in valid_ids else "PROPOSEE")
-
-valid_controls = controles[controles["facture_id"].isin(valid_ids)] if not controles.empty else controles
-accepted_count = len(valid_ids.intersection(set(controles.loc[controles["resultat"] != "REJETEE", "facture_id"]))) if not controles.empty else 0
-st.subheader("Aperçu")
-c1, c2, c3 = st.columns(3)
-c1.metric("Factures détectées", f"{len(invoice_ids)}")
-c2.metric("Factures validées", f"{accepted_count} / {len(invoice_ids)}")
-c3.metric("Écritures proposées", f"{len(journal_propose)} lignes")
-
-if not controles.empty:
-    with st.expander("Contrôles des factures"):
-        st.dataframe(controles, use_container_width=True, hide_index=True)
-
-invoice_tab, journal_tab, balance_tab, reports_tab = st.tabs(
-    ["Validation", "Journal", "Grand livre & balance", "CPC & bilan"]
-)
-
-with invoice_tab:
-    st.write("Examinez les contrôles, puis sélectionnez les factures dont vous approuvez les écritures.")
-    rejected = set(controles.loc[controles["resultat"] == "REJETEE", "facture_id"]) if not controles.empty else set()
-    selectable = [fid for fid in invoice_ids if fid not in rejected]
-    selected = st.multiselect(
-        "Factures approuvées",
-        options=selectable,
-        default=[fid for fid in selectable if fid in valid_ids],
-        help="Seules les factures sélectionnées alimentent les rapports.",
-    )
-    left, right = st.columns(2)
-    if left.button("Valider la sélection", type="primary"):
-        st.session_state.digicompta_validated_ids = set(selected)
-        st.rerun()
-    if right.button("Tout annuler"):
-        st.session_state.digicompta_validated_ids = set()
-        st.rerun()
-    if not journal_propose.empty:
-        details = journal_propose[journal_propose["facture_id"].isin(selected)]
-        st.dataframe(details, use_container_width=True, hide_index=True)
+with t_valid:
+    pieces = base["journal"][base["journal"].journal.isin(["AC", "VT"])]
+    resume = (pieces.groupby(["facture_id", "piece", "date", "journal"], sort=False)
+              .agg(total_ttc=("debit", "sum"), libelle=("libelle", "first")).reset_index())
+    if resume.empty:
+        st.info("Aucune écriture de facture exploitable.")
     else:
-        st.info("Aucune écriture n’a été générée. Vérifiez les contrôles ci-dessus.")
+        resume["tiers"] = resume.libelle.str.split(" - ", n=1).str[-1]
+        resume["type"] = resume.journal.map({"VT":"Vente", "AC":"Achat"})
+        resume = resume.sort_values(["date", "piece"]).reset_index(drop=True)
+        c1,c2,_ = st.columns([1,1,4])
+        if c1.button("✅ Tout valider"):
+            st.session_state.valides = set(ids_ok); st.rerun()
+        if c2.button("↩️ Tout annuler"):
+            st.session_state.valides = set(); st.rerun()
+        table = pd.DataFrame({"Valider": resume.facture_id.isin(st.session_state.valides), "Pièce":resume.piece,
+            "Facture":resume.facture_id,"Date":resume.date,"Type":resume.type,"Tiers":resume.tiers,
+            "Total TTC":resume.total_ttc.astype(float)})
+        edite = st.data_editor(table, hide_index=True, width="stretch",
+            disabled=["Pièce","Facture","Date","Type","Tiers","Total TTC"],
+            column_config={"Total TTC":st.column_config.NumberColumn(format="%.2f")}, key="validation_table")
+        st.session_state.valides = set(table.loc[edite["Valider"].values,"Facture"])
+        choix = st.selectbox("Détail de l'écriture", resume.facture_id.tolist())
+        st.dataframe(affichage(pieces[pieces.facture_id == choix][["piece","date","compte","intitule_compte","debit","credit"]]), width="stretch", hide_index=True)
+        note = base["controles"].set_index("facture_id").loc[choix,"detail"]
+        if note: st.warning(note)
 
-approved_journal = journal[journal["statut"] == "VALIDEE"].copy() if not journal.empty else journal
-with journal_tab:
-    st.subheader("Journal des factures validées")
-    if approved_journal.empty:
-        st.info("Validez une ou plusieurs factures pour afficher le journal.")
-    else:
-        st.dataframe(approved_journal, use_container_width=True, hide_index=True)
-        st.download_button("Télécharger le journal CSV", make_csv_download(approved_journal),
-                           "journal_valide.csv", "text/csv")
-
-with balance_tab:
-    st.subheader("Grand livre et balance des factures validées")
-    if approved_journal.empty:
-        st.info("Validez une ou plusieurs factures pour calculer les états.")
-    else:
-        gl = grand_livre(approved_journal)
-        balance = balance_generale(approved_journal)
-        ok_mouvements, ok_soldes = verifier_balance(balance)
-        st.success("Balance équilibrée" if ok_mouvements and ok_soldes else "Attention : balance non équilibrée")
-        gl_tab, trial_tab = st.tabs(["Grand livre", "Balance générale"])
-        with gl_tab:
-            st.dataframe(gl, use_container_width=True, hide_index=True)
-            st.download_button("Télécharger le grand livre CSV", make_csv_download(gl),
-                               "grand_livre.csv", "text/csv")
-        with trial_tab:
-            st.dataframe(balance, use_container_width=True, hide_index=True)
-            st.download_button("Télécharger la balance CSV", make_csv_download(balance),
-                               "balance_generale.csv", "text/csv")
-
-with reports_tab:
-    st.subheader("CPC et bilan simplifiés")
-    st.caption("Ces états sont calculés uniquement à partir des factures validées. Ils n’intègrent pas d’à-nouveaux, d’inventaire ni d’écritures complémentaires.")
-    if approved_journal.empty:
-        st.info("Validez une ou plusieurs factures pour afficher les états.")
-    else:
-        balance = balance_generale(approved_journal)
-        cpc, resultat = calculer_cpc(balance)
-        bilan, equilibre = calculer_bilan(balance, resultat)
-        st.metric("Résultat simplifié (MAD)", f"{resultat:,.2f}")
-        left, right = st.columns(2)
-        with left:
-            st.markdown("**CPC simplifié**")
-            st.dataframe(cpc, use_container_width=True, hide_index=True)
-            st.download_button("Télécharger le CPC CSV", make_csv_download(cpc), "cpc_simplifie.csv", "text/csv")
-        with right:
-            st.markdown("**Bilan simplifié**")
-            st.dataframe(bilan, use_container_width=True, hide_index=True)
-            st.info("Équilibré" if equilibre else "Non équilibré : les écritures d’ouverture et de clôture ne sont pas incluses dans cette démo.")
-            st.download_button("Télécharger le bilan CSV", make_csv_download(bilan), "bilan_simplifie.csv", "text/csv")
+with t_etats:
+    res = construire(df, st.session_state.valides)
+    j = res["journal"]
+    valide = j[j.statut == "VALIDEE"]
+    bal = balance_generale(valide)
+    cpc, resultat = bilan_cpc.calculer_cpc(bal)
+    bilan, eq_bilan = bilan_cpc.calculer_bilan(bal, resultat)
+    ok_m, ok_s = verifier_balance(bal)
+    total_actif = bilan.loc[bilan.rubrique == "Total actif", "montant"].iloc[0]
+    if not st.session_state.valides:
+        st.info("Aucune facture validée : l'ouverture et les écritures de période restent visibles.")
+    a,b,c,d = st.columns(4)
+    a.metric("Factures validées", f"{len(st.session_state.valides)} / {len(res['ids_ok'])}")
+    b.metric("Résultat simplifié", mad(resultat)); c.metric("Total actif", mad(total_actif))
+    d.metric("Balance équilibrée", "✅ Oui" if ok_m and ok_s and eq_bilan else "❌ Non")
+    classeur = construire_classeur(valide, grand_livre(valide), bal, res["inventaire"], res["alertes"],
+        dict(periode=f"du {P.DATE_OUVERTURE} au {P.DATE_ARRETE}", valides=len(st.session_state.valides), total=len(res["ids_ok"])))
+    st.download_button("📊 Export Excel", classeur, "etats_comptables_digicompta.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
+    tabs = st.tabs(["Journal","Grand livre","Balance","CPC","Bilan","Inventaire","Alertes"])
+    with tabs[0]:
+        st.dataframe(affichage(valide), width="stretch", hide_index=True); telecharger(valide,"journal_complet.csv","j")
+    with tabs[1]:
+        gl = grand_livre(valide)
+        if not gl.empty:
+            comptes = gl[["compte","intitule_compte"]].drop_duplicates()
+            compte = st.selectbox("Compte", comptes.apply(lambda r:f"{r.compte} - {r.intitule_compte}",axis=1).tolist())
+            st.dataframe(affichage(gl[gl.compte.astype(str)==compte.split(" - ")[0]]),width="stretch",hide_index=True)
+        telecharger(gl,"grand_livre.csv","gl")
+    with tabs[2]:
+        st.dataframe(affichage(bal),width="stretch",hide_index=True); telecharger(bal,"balance_generale.csv","bal")
+    with tabs[3]:
+        st.dataframe(affichage(cpc),width="stretch",hide_index=True); telecharger(cpc,"cpc_simplifie.csv","cpc")
+    with tabs[4]:
+        st.dataframe(affichage(bilan),width="stretch",hide_index=True); telecharger(bilan,"bilan_simplifie.csv","bil")
+    with tabs[5]:
+        st.dataframe(affichage(res["inventaire"]),width="stretch",hide_index=True); telecharger(res["inventaire"],"inventaire_stock.csv","inv")
+    with tabs[6]:
+        if res["alertes"]:
+            for alerte in res["alertes"]: st.warning(alerte)
+        else: st.success("Aucune alerte.")

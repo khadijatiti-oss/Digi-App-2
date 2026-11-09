@@ -4,5 +4,5 @@ numpy
 openpyxl
 pdfplumber
 reportlab
-pillow
 pytesseract
+pillow
