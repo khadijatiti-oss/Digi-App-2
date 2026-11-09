@@ -1,12 +1,10 @@
 # DigiCompta CGNC
 
-Prototype académique de traitement comptable de factures marocaines (CGNC/PCGE), avec données fictives. Il calcule des écritures proposées, un grand livre, une balance générale, ainsi que des états simplifiés. **Ce projet n'est pas un logiciel comptable ou fiscal certifié.** Faites vérifier les comptes et règles fiscales par une personne qualifiée avant tout usage réel.
+Prototype académique de traitement comptable de factures marocaines (CGNC/PCGE), avec données fictives. Le projet comprend un moteur Python de génération d'écritures proposées et une interface locale Streamlit pour les examiner, les valider et consulter des états simplifiés.
 
-## État actuel
+> **Avertissement :** DigiCompta est un prototype pédagogique, pas un logiciel comptable ou fiscal certifié. Les comptes et règles doivent être vérifiés par une personne qualifiée. N'importez pas de factures réelles ou de données personnelles dans cette démo.
 
-Le dépôt contient les modules Python de base pour générer un jeu de données fictif, proposer les écritures de factures, puis calculer le grand livre, la balance et les états simplifiés. Il ne contient pas encore l'interface web décrite dans le projet initial (`app.py` / Streamlit), le pipeline complet avec validations, ni les modules d'écritures complémentaires (ouverture, règlements et inventaire). Les rapports CSV sont générés localement et ne sont pas suivis dans Git.
-
-## Prérequis et lancement
+## Lancer l'interface web locale
 
 Python 3.10+ recommandé.
 
@@ -14,34 +12,43 @@ Python 3.10+ recommandé.
 python -m venv .venv
 # macOS/Linux
 source .venv/bin/activate
-# Windows PowerShell : .venv\Scripts\Activate.ps1
+# Windows PowerShell : .venv\\Scripts\\Activate.ps1
 pip install -r requirements.txt
-
-python generate_dataset.py
-python moteur_ecritures.py data/factures_atlas.csv output/
-python etats_comptables.py output/journal.csv output/
-python bilan_cpc.py output/balance_generale.csv output/
+streamlit run app.py
 ```
 
-Les sorties seront créées dans `output/`. Le moteur produit des écritures au statut `PROPOSEE`; ce dépôt ne fournit pas encore d'écran permettant de les valider. `bilan_cpc.py` calcule un bilan et un CPC simplifiés à partir de la balance.
+L'application s'ouvre dans le navigateur. Elle démarre avec un jeu de démonstration fictif généré automatiquement. Vous pouvez également importer un CSV respectant le schéma `factures_atlas.csv`.
 
-## Fichiers principaux
+## Fonctionnalités actuelles
 
-- `generate_dataset.py` — génère 30 factures fictives dans `data/factures_atlas.csv`.
+- Génération des écritures proposées à partir des factures CSV, avec contrôles et statut de validation manuelle.
+- Interface pour approuver ou annuler les factures traitées.
+- Consultation et téléchargement CSV du journal validé, du grand livre et de la balance.
+- Affichage et téléchargement d'un CPC et d'un bilan simplifiés.
+
+Les rapports sont calculés à partir des factures validées seulement. Les écritures d'ouverture, règlements et inventaire ne sont pas encore intégrés à l'interface; le bilan peut donc ne pas être équilibré. Les validations de l'interface sont conservées dans la session Streamlit, pas dans une base de données.
+
+## Structure
+
+- `app.py` — interface web locale Streamlit.
+- `generate_dataset.py` — génère un jeu fictif de 30 factures sous `data/factures_atlas.csv`.
 - `plan_comptable.py` — comptes et correspondance catégories/comptes.
 - `moteur_ecritures.py` — contrôles et génération des écritures proposées.
 - `etats_comptables.py` — grand livre et balance générale.
 - `bilan_cpc.py` — CPC et bilan simplifiés.
 - `requirements.txt` — dépendances Python.
 
-## Données et limites
+## Exécution en ligne de commande
 
-Les données générées sont fictives. Les états sont pédagogiques et incomplets : notamment, ils ne constituent pas des états de synthèse légaux et n'incluent pas tous les traitements fiscaux/comptables. Les comptes, taux de TVA et règles applicables doivent être vérifiés au regard des textes marocains en vigueur. N'utilisez pas de factures réelles ou de données personnelles dans cette version de démonstration.
+```bash
+python generate_dataset.py
+python moteur_ecritures.py data/factures_atlas.csv output/
+python etats_comptables.py output/journal.csv output/
+python bilan_cpc.py output/balance_generale.csv output/
+```
 
-## Suite prévue
+Les sorties locales sont enregistrées dans `output/`, ignoré par Git.
 
-1. Ajouter les modules d'écritures complémentaires et le pipeline de validation.
-2. Créer l'interface web, ses tests automatisés et les instructions de déploiement.
-3. Ajouter séparément la démo HTML du navigateur et documenter ses dépendances et limites.
+## Limites et prochaines étapes
 
-Toutes les sociétés et informations du jeu de démonstration sont fictives.
+Le projet ne gère pas encore la persistance des validations, les écritures d'ouverture/règlements/inventaire, les tests automatisés, l'authentification ni le stockage sécurisé des documents. Les états sont incomplets et ne sont pas destinés à un usage légal ou fiscal. Toute donnée de démonstration doit rester fictive.
