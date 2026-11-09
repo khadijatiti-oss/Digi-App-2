@@ -1,2 +1,8 @@
-pandas>=2.0,<3.0
-streamlit>=1.35,<2.0
+pandas
+streamlit>=1.50
+numpy
+openpyxl
+pdfplumber
+reportlab
+pillow
+pytesseract
